@@ -219,11 +219,14 @@ main (int argc, char **argv)
 
 #if 1
 	//rl.rlim_cur = rl.rlim_max = num_pipes * 2 + 50;
-	rl.rlim_cur = rl.rlim_max = 65536; //RLIM_INFINITY;
-
+	rl.rlim_cur = rl.rlim_max =  RLIM_INFINITY;
+	getrlimit(RLIMIT_NOFILE, &rl);
+	printf("%ld   %ld\n",rl.rlim_max,rl.rlim_cur); 
 	if (setrlimit(RLIMIT_NOFILE, &rl) == -1) {
 		perror("setrlimit");
 	}
+	getrlimit(RLIMIT_NOFILE, &rl);
+	printf("%ld\n",rl.rlim_max); 
 #endif
 	cfg = event_config_new();
 	if ( method == EPOLL ) {
@@ -253,7 +256,7 @@ main (int argc, char **argv)
 		ave_polling[i] = 0;
 		ave_all[i] = 0;
 	}
-	for (int x = num_active , index = 0; x <= 32700 ; x += 500, index++) {
+	for (int x = num_active , index = 0; x <= 98000 ; x += 500, index++) {
 		num_pipes = x;
 		events = calloc(num_pipes, sizeof(struct event*));
 		pipes = calloc(num_pipes * 2, sizeof(int));
@@ -287,7 +290,7 @@ main (int argc, char **argv)
 		free(pipes);
 
 	}
-	for (int x = num_active , index = 0; x <= 32700 ; x += 500, index++) {
+	for (int x = num_active , index = 0; x <= 98000  ; x += 500, index++) {
 
 		fprintf(fout_a, "%d %d\n", x,
 		        ave_all[index]);
