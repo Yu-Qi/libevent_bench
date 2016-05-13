@@ -1,5 +1,4 @@
 FLAGS = -O3 -fno-guess-branch-probability -g
-PARA = -n 1000 -a 1000 -w 50
 
 make:
 	gcc $(FLAGS) -o bench bench.c -levent 
