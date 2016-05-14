@@ -85,17 +85,24 @@
 #include <event.h>
 #include <event2/event.h>
 
+#include <pthread.h>
+
 static int count, writes, fired;
 static int *pipes;
-static int num_pipes, num_active, num_writes, method;
+static int num_pipes, num_active, num_writes;
+static int cur_num_fd;
 static struct event **events;
 static int timers;
 static FILE *fout_a, *fout_p;
-
+// 32700 / 500
 static int times_all[100], times_polling[100], ave_all[400], ave_polling[400];
 
-static struct event_config *cfg;
-static struct event_base *base;
+
+
+typedef struct thread_para{
+	int start;
+	int end;
+} para;
 
 int average(int d[]) {
 	int tmp;
@@ -121,6 +128,7 @@ read_cb(int fd, short which, void *arg)
 	}
 
 	count += read(fd, &ch, sizeof(ch));   //ch = 'e'  ,receive from write()
+	//printf("fd: %d , fd2: %d\n",fd,(2*widx+1));
 	if (writes) {			//left number how many clinets need to do write-IO
 		if (widx >= num_pipes)
 			widx -= num_pipes;
@@ -130,27 +138,38 @@ read_cb(int fd, short which, void *arg)
 	}
 }
 
+void *run_once( void *ptr)
+/*
 struct timeval *
-run_once(int index)
-{
+run_once(int index)*/
+{	
+	struct event_config *cfg;
+	struct event_base *base;
+	cfg = event_config_new();
+
+
+	event_config_avoid_method(cfg, "epoll");
+	event_config_avoid_method(cfg, "poll");
+	
+	base = event_base_new_with_config(cfg);
+	event_config_free(cfg);
+	para *paras = ptr;
+	printf("start %d 	end: %d\n",paras->start,paras->end);
+
 	int *cp, i, space;
 	static struct timeval ta, ts, te, tv;
 	static struct timeval t1, t2, t3;
-		//ta : recode the beginning time point ,meaning the all time
 	gettimeofday(&ta, NULL);
-		//construct a new event for use with base to moniter socketpair
-	for (cp = pipes, i = 0; i < num_pipes; i++, cp += 2) 
+	
+	for(cp = pipes+2*paras->start, i = paras->start; i<=paras->end; i++, cp +=2 ){
+		printf("check: %d\n",i );
 		events[i] = event_new(base, cp[0], EV_READ | EV_PERSIST,  read_cb, (void *) i);
-	}
-	gettimeofday(&t1, NULL);
-		//add events to the monitoring event set
-	for (cp = pipes, i = 0; i < num_pipes; i++, cp += 2) {
-		tv.tv_sec  = 10.;
-		tv.tv_usec = drand48() * 1e6;
 		event_add(events[i], NULL);
 	}
-	gettimeofday(&t2, NULL);
 
+	gettimeofday(&t1, NULL);
+
+	//event_loop(EVLOOP_ONCE | EVLOOP_NONBLOCK);
 	fired = 0;
 	space = num_pipes / num_active;
 	space = space * 2;
@@ -158,29 +177,31 @@ run_once(int index)
 		write(pipes[i * space + 1], "e", 1);
 	count = 0;
 	writes = num_writes;
+	gettimeofday(&t2, NULL);
 
 	gettimeofday(&ts, NULL);
-		//monitor whether there is active event
 	do {
+		//printf("count %d,fired %d\n",count,fired);
 		event_base_loop(base,	EVLOOP_ONCE | EVLOOP_NONBLOCK);
 	} while (count != fired);
 	gettimeofday(&te, NULL);
 
 	timersub(&t1, &ta, &t3);
-	timersub(&t2, &t1, &t2);	
 	timersub(&te, &ta, &ta);
 	timersub(&te, &ts, &ts);
+	timersub(&te, &t1, &t1);
+	timersub(&te, &t2, &t2);
 
-
-
-	fprintf(stdout, "%8ld %8ld %8ld %8ld\n",  ta.tv_sec * 1000000L + ta.tv_usec,
+	fprintf(stdout, "%8ld %8ld %8ld %8ld %8ld\n",  ta.tv_sec * 1000000L + ta.tv_usec,
 	        ts.tv_sec * 1000000L + ts.tv_usec,
+	        t1.tv_sec * 1000000L+ t1.tv_usec,
 	        t2.tv_sec* 1000000L +  t2.tv_usec,
 	        t3.tv_sec * 1000000L +t3.tv_usec
 	        );
-	times_all[index] = ta.tv_sec * 1000000L + ta.tv_usec;
-	times_polling[index] = ts.tv_sec * 1000000L + ts.tv_usec;
-
+	//times_all[index] = ta.tv_sec * 1000000L + ta.tv_usec;
+	//times_polling[index] = ts.tv_sec * 1000000L + ts.tv_usec;
+	/*ave_all[index] = ta.tv_sec * 1000000L + ta.tv_usec;
+	ave_polling[index] = ts.tv_sec * 1000000L + ts.tv_usec;*/
 	for (int i = 0 ; i < num_pipes ; i++) {
 		event_del(events[i]);
 		event_free(events[i]);
@@ -199,18 +220,12 @@ main (int argc, char **argv)
 	num_pipes = 100;
 	num_active = 1;
 	num_writes = num_pipes;
-	method = 1;	//default is epoll
-	while ((c = getopt(argc, argv, "m:a:w:te")) != -1) {
+	cur_num_fd = 0;
+	while ((c = getopt(argc, argv, "a:w:te")) != -1) {
 		switch (c) {
-			//select the backend method
-		case 'm':
-			method = atoi(optarg);
-			break;
-			//the number of the active clients
 		case 'a':
 			num_active = atoi(optarg);
 			break;
-			//the number of the addtional write
 		case 'w':
 			num_writes = atoi(optarg);
 			break;
@@ -224,51 +239,41 @@ main (int argc, char **argv)
 	}
 
 #if 1
-		//set the hard, soft source to Max
+	//rl.rlim_cur = rl.rlim_max = num_pipes * 2 + 50;
 	rl.rlim_cur = rl.rlim_max =  RLIM_INFINITY;
-	getrlimit(RLIMIT_NOFILE, &rl);
-	printf("%ld   %ld\n",rl.rlim_max,rl.rlim_cur); 
+
 	if (setrlimit(RLIMIT_NOFILE, &rl) == -1) {
 		perror("setrlimit");
 	}
-	getrlimit(RLIMIT_NOFILE, &rl);
-	printf("%ld\n",rl.rlim_max); 
+
 #endif
-		// select the method by setting config
-	cfg = event_config_new();
-	if ( method == EPOLL ) {
-		fout_a = fopen("data/100_all_epoll.txt", "w");
-		fout_p = fopen("data/100_polling_epoll.txt", "w");
-	}
-	else if ( method == POLL ) {
-		fout_a = fopen("data/100_all_poll.txt", "w");
-		fout_p = fopen("data/100_polling_poll.txt", "w");
-		event_config_avoid_method(cfg, "epoll");
-		event_config_avoid_method(cfg, "select");
-	}
-	else if ( method == SELECT ) {
-		fout_a = fopen("data/100_all_select.txt", "w");
-		fout_p = fopen("data/100_polling_select.txt", "w");
-		event_config_avoid_method(cfg, "epoll");
-		event_config_avoid_method(cfg, "poll");
-	}
+	//cfg = event_config_new();
 
+
+	fout_a = fopen("data/100_all_select.txt", "w");
+	fout_p = fopen("data/100_polling_select.txt", "w");
+	/*event_config_avoid_method(cfg, "epoll");
+	event_config_avoid_method(cfg, "poll");
+	
 	base = event_base_new_with_config(cfg);
-	event_config_free(cfg);
+	event_config_free(cfg);*/
 
-	const char *theMethod = event_base_get_method(base);
-	printf("the actual method in use :  %s\n", theMethod);
+	//const char *theMethod = event_base_get_method(base);
+	//printf("the actual method in use :  %s\n", theMethod);
 
 	for ( i = 0; i < 100; i++) {
 		ave_polling[i] = 0;
 		ave_all[i] = 0;
 	}
-		//the number of the socket is from num_active to 100,000
-	for (int x = num_active , index = 0; x <= 98000 ; x += 500, index++) {
-		x = 98000;
+	pthread_t *pid;
+	pid = malloc(sizeof(pthread_t)*2000);
+	para *paras;
+	paras = malloc(sizeof(para)*2000);
+	int x=600;
+
+	//for (int x = num_active , index = 0; x <= 98000 ; x += 500, index++) {
 		num_pipes = x;
 		events = calloc(num_pipes, sizeof(struct event*));
-			//pipes is the double int space for socketpair
 		pipes = calloc(num_pipes * 2, sizeof(int));
 		if (events == NULL || pipes == NULL) {
 			perror("malloc");
@@ -282,13 +287,26 @@ main (int argc, char **argv)
 			}
 		}
 		printf("%d th\n", x);
-			//average the value to reduce error
-		for ( i = 0 ; i < 100; i++)
-			tv = run_once(i);
-		ave_all[index] = average(times_all);
-		ave_polling[index] = average(times_polling);
+		//	average the value to reduce error
+		for(int index=0,j=0; index<num_pipes; index +=400, j++){
+			puts("in");			
+			paras[j].start = index;
+			if(index +400 >= num_pipes)
+				paras[j].end = num_pipes;
+			else
+				paras[j].end = index+399;
+			printf("before s:%d e%d\n",paras[j].start,paras[j].end);
+			pthread_create(&pid[j], NULL, run_once, &paras[j]);
+			printf("%d th\n",j);
+		}
+		//for ( i = 0 ; i < 100; i++)
+			//tv = run_once(i);
+		for(int index=0,j=0; index<num_pipes; index +=500, j++)
+			pthread_join(pid[0],NULL);
+		//ave_all[index] = average(times_all);
+		//ave_polling[index] = average(times_polling);
 
-			//close the socket communication and free it
+
 		for (cp = pipes, i = 0; i < num_pipes; i++, cp += 2) {
 			shutdown(cp[0], 2);
 			shutdown(cp[1], 2);
@@ -299,14 +317,16 @@ main (int argc, char **argv)
 		free(events);
 		free(pipes);
 
-	}
+	//}
+		/*
 	for (int x = num_active , index = 0; x <= 98000  ; x += 500, index++) {
 
 		fprintf(fout_a, "%d %d\n", x,
 		        ave_all[index]);
 		fprintf(fout_p, "%d %d\n", x,
 		        ave_polling[index]);
-	}
+	}*/
+
 	exit(0);
 }
 
